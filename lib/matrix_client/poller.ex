@@ -1,5 +1,5 @@
 ##
-# Copyright (C) 2021-2022  Valentin Lorentz
+# Copyright (C) 2021-2023  Valentin Lorentz
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License version 3,
@@ -885,38 +885,41 @@ defmodule M51.MatrixClient.Poller do
     member = M51.MatrixClient.State.room_member(state, room_id, sender)
     send = make_send_function(sup_pid, event, write)
 
-    reason =
-      case event["content"] do
-        %{"reason" => reason} when is_binary(reason) -> ": #{reason}"
-        _ -> ""
-      end
+    tags = %{"account" => sender}
 
     # TODO: dedup this with m.reaction handler
-    display_name =
+    tags =
       case member do
         %M51.Matrix.RoomMember{display_name: display_name} when display_name != nil ->
-          " (#{display_name})"
+          Map.put(tags, "+draft/display-name", display_name)
 
         _ ->
-          ""
+          tags
       end
 
-    tags =
-      case event do
-        %{"redacts" => redacts_id}
-        when is_binary(redacts_id) ->
-          %{"+draft/reply" => redacts_id}
+    case event do
+      %{"redacts" => redacts_id} when is_binary(redacts_id) ->
+        case event["content"] do
+          %{"reason" => reason} when is_binary(reason) ->
+            send.(%M51.Irc.Command{
+              tags: tags,
+              source: nick2nuh(sender),
+              command: "REDACT",
+              params: [channel, redacts_id, reason]
+            })
 
-        _ ->
-          %{}
-      end
+          _ ->
+            send.(%M51.Irc.Command{
+              tags: tags,
+              source: nick2nuh(sender),
+              command: "REDACT",
+              params: [channel, redacts_id]
+            })
+        end
 
-    send.(%M51.Irc.Command{
-      tags: tags,
-      source: "server.",
-      command: "NOTICE",
-      params: [channel, "#{sender}#{display_name} deleted an event#{reason}"]
-    })
+      _ ->
+        nil
+    end
   end
 
   def handle_event(
@@ -1154,6 +1157,9 @@ defmodule M51.MatrixClient.Poller do
   end
 
   # Sends self JOIN, RPL_TOPIC/RPL_NOTOPIC, RPL_NAMREPLY
+  #
+  # Returns whether the announce was actually sent (ie. if the channel has a canonical
+  # alias, or was allowed to be sent without a canonical alias)
   defp send_channel_welcome(
          sup_pid,
          room_id,
@@ -1169,15 +1175,20 @@ defmodule M51.MatrixClient.Poller do
 
     supports_channel_rename = Enum.member?(capabilities, :channel_rename)
 
-    if old_canonical_alias == nil || !supports_channel_rename do
-      announce_new_channel(
-        M51.IrcConn.Supervisor,
-        sup_pid,
-        room_id,
-        write,
-        event
-      )
-    end
+    announced_new_channel =
+      if old_canonical_alias == nil || !supports_channel_rename do
+        announce_new_channel(
+          M51.IrcConn.Supervisor,
+          sup_pid,
+          room_id,
+          write,
+          event
+        )
+
+        true
+      else
+        false
+      end
 
     if old_canonical_alias != nil do
       if supports_channel_rename do
@@ -1194,6 +1205,8 @@ defmodule M51.MatrixClient.Poller do
           command: "RENAME",
           params: [old_canonical_alias, new_canonical_alias, "Canonical alias changed"]
         })
+
+        true
       else
         close_renamed_channel(
           sup_pid,
@@ -1202,6 +1215,8 @@ defmodule M51.MatrixClient.Poller do
           canonical_alias_sender,
           old_canonical_alias
         )
+
+        announced_new_channel
       end
     end
   end
@@ -1217,6 +1232,7 @@ defmodule M51.MatrixClient.Poller do
     state = M51.IrcConn.Supervisor.matrix_state(sup_pid)
     nick = M51.IrcConn.State.nick(irc_state)
     channel = M51.MatrixClient.State.room_irc_channel(state, room_id)
+    capabilities = M51.IrcConn.State.capabilities(irc_state)
     send_join = make_send_function(sup_pid, event, write)
     send_nonjoin = make_send_function(sup_pid, nil, write)
 
@@ -1262,31 +1278,34 @@ defmodule M51.MatrixClient.Poller do
         end
     end
 
-    # send RPL_NAMREPLY
-    overhead = make_numeric.("353", ["=", channel, ""]) |> M51.Irc.Command.format() |> byte_size()
+    if !Enum.member?(capabilities, :no_implicit_names) do
+      # send RPL_NAMREPLY
+      overhead =
+        make_numeric.("353", ["=", channel, ""]) |> M51.Irc.Command.format() |> byte_size()
 
-    # note for later: if we ever implement prefixes, make sure to add them
-    # *after* calling nick2nuh; we don't want to have prefixes in the username part.
-    M51.MatrixClient.State.room_members(state, room_id)
-    |> Enum.map(fn {user_id, _member} ->
-      nuh = nick2nuh(user_id)
-      # M51.Irc.Command does not escape " " in trailing
-      String.replace(nuh, " ", "\\s") <> " "
-    end)
-    |> Enum.sort()
-    |> M51.Irc.WordWrap.join_tokens(512 - overhead)
-    |> Enum.map(fn line ->
-      line = line |> String.trim_trailing()
+      # note for later: if we ever implement prefixes, make sure to add them
+      # *after* calling nick2nuh; we don't want to have prefixes in the username part.
+      M51.MatrixClient.State.room_members(state, room_id)
+      |> Enum.map(fn {user_id, _member} ->
+        nuh = nick2nuh(user_id)
+        # M51.Irc.Command does not escape " " in trailing
+        String.replace(nuh, " ", "\\s") <> " "
+      end)
+      |> Enum.sort()
+      |> M51.Irc.WordWrap.join_tokens(512 - overhead)
+      |> Enum.map(fn line ->
+        line = line |> String.trim_trailing()
 
-      if line != "" do
-        # RPL_NAMREPLY
-        send_numeric.("353", ["=", channel, line])
-      end
-    end)
-    |> Enum.filter(fn line -> line != nil end)
+        if line != "" do
+          # RPL_NAMREPLY
+          send_numeric.("353", ["=", channel, line])
+        end
+      end)
+      |> Enum.filter(fn line -> line != nil end)
 
-    # RPL_ENDOFNAMES
-    send_numeric.("366", [channel, "End of /NAMES list"])
+      # RPL_ENDOFNAMES
+      send_numeric.("366", [channel, "End of /NAMES list"])
+    end
   end
 
   defp close_renamed_channel(

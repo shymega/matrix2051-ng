@@ -18,9 +18,9 @@ defmodule M51.IrcConn.HandlerTest do
   use ExUnit.Case, async: false
   doctest M51.IrcConn.Handler
 
-  @cap_ls_302 ":server. CAP * LS :account-tag batch draft/account-registration=before-connect draft/channel-rename draft/chathistory draft/multiline=max-bytes=8192 draft/sasl-ir echo-message extended-join labeled-response message-tags sasl=PLAIN server-time soju.im/account-required standard-replies userhost-in-names\r\n"
-  @cap_ls ":server. CAP * LS :account-tag batch draft/account-registration draft/channel-rename draft/chathistory draft/multiline draft/sasl-ir echo-message extended-join labeled-response message-tags sasl server-time soju.im/account-required standard-replies userhost-in-names\r\n"
-  @isupport "CASEMAPPING=rfc3454 CLIENTTAGDENY=*,-draft/react,-draft/reply CHANLIMIT= CHANTYPES=#! CHATHISTORY=100 MAXTARGETS=1 MSGREFTYPES=msgid PREFIX= TARGMAX=JOIN:1,PART:1 UTF8ONLY :are supported by this server\r\n"
+  @cap_ls_302 ":server. CAP * LS :account-tag batch draft/account-registration=before-connect draft/channel-rename draft/chathistory draft/message-redaction draft/multiline=max-bytes=8192 draft/no-implicit-names draft/sasl-ir echo-message extended-join labeled-response message-tags sasl=PLAIN server-time soju.im/account-required standard-replies userhost-in-names\r\n"
+  @cap_ls ":server. CAP * LS :account-tag batch draft/account-registration draft/channel-rename draft/chathistory draft/message-redaction draft/multiline draft/no-implicit-names draft/sasl-ir echo-message extended-join labeled-response message-tags sasl server-time soju.im/account-required standard-replies userhost-in-names\r\n"
+  @isupport "CASEMAPPING=rfc3454 CLIENTTAGDENY=*,-draft/react,-draft/reply CHANLIMIT= CHANMODES=b,,,i CHANTYPES=#! CHATHISTORY=100 LINELEN=8192 MAXTARGETS=1 MSGREFTYPES=msgid PREFIX= TARGMAX=JOIN:1,PART:1 UTF8ONLY :are supported by this server\r\n"
 
   setup do
     start_supervised!({MockMatrixClient, {self()}})
@@ -449,6 +449,26 @@ defmodule M51.IrcConn.HandlerTest do
     Logger.add_backend(:console)
   end
 
+  test "post-registration CAP LS", %{handler: handler} do
+    do_connection_registration(handler)
+
+    send(handler, cmd("CAP LS 302"))
+    assert_line(@cap_ls_302)
+
+    send(handler, cmd("CAP LS"))
+    assert_line(@cap_ls)
+  end
+
+  test "post-registration CAP LIST", %{handler: handler} do
+    caps_requested = ["draft/multiline", "extended-join", "message-tags", "server-time"]
+    caps_expected = Enum.join(["batch", "labeled-response", "sasl"] ++ caps_requested, " ")
+
+    do_connection_registration(handler, caps_requested)
+
+    send(handler, cmd("CAP LIST"))
+    assert_line(":server. CAP * LIST :" <> caps_expected <> "\r\n")
+  end
+
   test "labeled response", %{handler: handler} do
     do_connection_registration(handler)
 
@@ -742,7 +762,7 @@ defmodule M51.IrcConn.HandlerTest do
     assert line == "@label=l2 BATCH +#{batch_id} :labeled-response\r\n"
 
     assert_line(
-      "@batch=#{batch_id} :server. 352 foo:example.org #existing_room:example.org user1 example.org * user1:example.org H :0 user1:example.org\r\n"
+      "@batch=#{batch_id} :server. 352 foo:example.org #existing_room:example.org user1 example.org * user1:example.org H :0 user one\r\n"
     )
 
     assert_line(
@@ -768,7 +788,7 @@ defmodule M51.IrcConn.HandlerTest do
     send(handler, cmd("WHO #existing_room:example.org"))
 
     assert_line(
-      ":server. 352 foo:example.org #existing_room:example.org user1 example.org * user1:example.org H :0 user1:example.org\r\n"
+      ":server. 352 foo:example.org #existing_room:example.org user1 example.org * user1:example.org H :0 user one\r\n"
     )
 
     assert_line(
@@ -806,7 +826,7 @@ defmodule M51.IrcConn.HandlerTest do
     assert line == "@label=l1 BATCH +#{batch_id} :labeled-response\r\n"
 
     assert_line(
-      "@batch=#{batch_id} :server. 311 foo:example.org user1:example.org user1 example.org * :user1:example.org\r\n"
+      "@batch=#{batch_id} :server. 311 foo:example.org user1:example.org user1 example.org * :user one\r\n"
     )
 
     assert_line(
@@ -828,7 +848,7 @@ defmodule M51.IrcConn.HandlerTest do
     assert_line("BATCH :-#{batch_id}\r\n")
   end
 
-  test "WHOIS", %{handler: handler} do
+  test "WHOIS unknown user", %{handler: handler} do
     do_connection_registration(handler)
 
     send(handler, cmd("@label=l1 WHOIS unknown_user:example.com"))
@@ -853,6 +873,18 @@ defmodule M51.IrcConn.HandlerTest do
     )
 
     assert_line("BATCH :-#{batch_id}\r\n")
+  end
+
+  test "WHOIS non-MXID", %{handler: handler} do
+    do_connection_registration(handler)
+
+    send(handler, cmd("@label=l1 WHOIS not_enough_colons"))
+
+    assert_line("@label=l1 :server. 401 foo:example.org not_enough_colons :No such nick\r\n")
+
+    send(handler, cmd("@label=l1 WHOIS :with spaces"))
+
+    assert_line("@label=l1 :server. 401 foo:example.org * :No such nick\r\n")
   end
 
   test "MODE on user", %{handler: handler} do
@@ -1160,5 +1192,20 @@ defmodule M51.IrcConn.HandlerTest do
       "@batch=#{batch_id};msgid=$event :nick:example.org!nick@example.org PRIVMSG #chan :event in direction f from blah\r\n"
     )
     assert_line("BATCH :-#{batch_id}\r\n")
+
+  test "redact a message for no reason", %{handler: handler} do
+    do_connection_registration(handler)
+
+    send(handler, cmd("REDACT #existing_room:example.org $event1"))
+
+    assert_message({:send_redact, "#existing_room:example.org", nil, "$event1", nil})
+  end
+
+  test "redact a message for a reason", %{handler: handler} do
+    do_connection_registration(handler)
+
+    send(handler, cmd("REDACT #existing_room:example.org $event1 :spam"))
+
+    assert_message({:send_redact, "#existing_room:example.org", nil, "$event1", "spam"})
   end
 end

@@ -59,3 +59,35 @@ This does the following:
 * Create a temporary user to run the process as
 * Makes sure the process can't write any file on the system or gain new capabilities
   (implied by `DynamicUser=true`)
+
+# Running matrix2051 as a container
+
+Alternatively a Containerfile is provided as well for convenience. The
+image can be built with either [podman](https://podman.io/) or
+[docker](https://www.docker.com/).
+
+To build it:
+
+```
+podman build -t matrix2051 --file dist/Containerfile .
+```
+
+To run it:
+
+```
+podman run --publish 2051:2051 --interactive matrix2051
+```
+
+Alternatively, with docker to build it:
+
+```
+cd /path/to/matrix2051
+cp dist/Containerfile Dockerfile
+docker build -t matrix2051 .
+```
+
+To run it:
+
+```
+docker run -p 2051:2051 -it matrix2051
+```
