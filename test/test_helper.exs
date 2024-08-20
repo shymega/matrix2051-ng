@@ -14,8 +14,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ###
 
-ExUnit.start()
-ExUnit.start(timeout: 5000)
+ExUnit.start(timeout: 5000, capture_log: true)
 
 Mox.defmock(MockHTTPoison, for: HTTPoison.Base)
 M51.Config.set_httpoison(MockHTTPoison)
