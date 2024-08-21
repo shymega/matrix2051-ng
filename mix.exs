@@ -55,7 +55,8 @@ defmodule M51.MixProject do
       {:mochiweb, "~> 2.22"},
       {:jason, "~> 1.2"},
       {:httpoison, "~> 1.7"},
-      {:mox, "~> 1.0.0", only: :test}
+      {:mox, "~> 1.0.0", only: :test},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 end
